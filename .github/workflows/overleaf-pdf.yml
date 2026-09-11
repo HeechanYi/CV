@@ -1,0 +1,75 @@
+name: Update Overleaf PDF
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  MAIN_TEX: main.tex
+  OUTPUT_PDF: CV.pdf
+
+jobs:
+  update-pdf:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout GitHub repository
+        uses: actions/checkout@v6
+
+      - name: Clone Overleaf project
+        env:
+          OVERLEAF_TOKEN: ${{ secrets.OVERLEAF_TOKEN }}
+          OVERLEAF_PROJECT_ID: ${{ secrets.OVERLEAF_PROJECT_ID }}
+        run: |
+          AUTH=$(printf 'git:%s' "$OVERLEAF_TOKEN" | base64 | tr -d '\n')
+          git -c http.extraHeader="Authorization: Basic $AUTH" clone \
+            "https://git.overleaf.com/$OVERLEAF_PROJECT_ID" overleaf
+
+      - name: Check whether Overleaf changed
+        id: check
+        run: |
+          HEAD=$(git -C overleaf rev-parse HEAD)
+          echo "head=$HEAD" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && \
+             [ -f .overleaf-head ] && \
+             [ "$(cat .overleaf-head)" = "$HEAD" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No changes detected."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Overleaf changes detected."
+          fi
+
+      - name: Compile LaTeX
+        if: steps.check.outputs.changed == 'true'
+        uses: xu-cheng/latex-action@v4
+        with:
+          working_directory: overleaf
+          root_file: ${{ env.MAIN_TEX }}
+
+      - name: Copy PDF
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          BASENAME="${MAIN_TEX%.tex}"
+          cp "overleaf/${BASENAME}.pdf" "$OUTPUT_PDF"
+          echo "${{ steps.check.outputs.head }}" > .overleaf-head
+          rm -rf overleaf
+
+      - name: Commit updated PDF
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$OUTPUT_PDF" .overleaf-head
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+          else
+            git commit -m "Update manuscript PDF"
+            git push
+          fi
